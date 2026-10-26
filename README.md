@@ -1,2 +1,2 @@
-# pigment-tm1-connectors
+# pigment-tm1-connectors and more
 Enterprise Performance Management connectors: bidirectional Pigment-TM1 integration (Python/Java) and TM1-Quantum Computing integration for optimization research.
