@@ -1,266 +1,235 @@
-# Suite EPM : connecteurs Pigment ⇄ TM1 et aide à la décision quantique
+# EPM Suite: Pigment ⇄ TM1 connectors and a quantum decision-support prototype
 
-Trois outils pour faire circuler et exploiter les données de planification financière entre **Pigment** et **IBM Planning Analytics (TM1)**, jusqu'au **calcul quantique**.
+*[Version française](README.fr.md)*
 
-Ils partagent quatre exigences :
-
-| Exigence | Ce que cela veut dire ici |
-|---|---|
-| **Vérifiable** | Chaque écriture est relue puis comparée cellule par cellule à la source. Les empreintes SHA‑256 et les preuves de chaque exécution sont conservées. |
-| **Infaillible** | Rien n'est écrit tant que les données ne sont pas validées. L'écriture est atomique, et l'état antérieur est restauré automatiquement en cas d'écart. |
-| **Sécurisé** | Aucun secret dans les fichiers. TLS est obligatoire, les secrets sont masqués dans les logs, les droits sur les fichiers sont restreints. |
-| **Gouvernable** | Les flux sont déclarés et versionnés. L'écriture exige une approbation nominative, et les quatre yeux en production. Un journal d'audit chaîné et signé enregistre tout. |
+> **⚠️ This is a first draft.**
+> This code has not been run against real Pigment, TM1, or IBM Quantum systems yet.
+> It has only been tested against simulated versions of those systems.
+> Please test it carefully in a non-production environment before you rely on it.
+> Feedback, corrections, and contributions are very welcome.
 
 ---
 
-## Sommaire
+## What is in this repository?
 
-1. [Vue d'ensemble](#vue-densemble)
-2. [Connecteur Pigment ⇄ TM1 — Python](#1-connecteur-pigment--tm1--python)
-3. [Connecteur Pigment ⇄ TM1 — Java](#2-connecteur-pigment--tm1--java)
-4. [Aide à la décision TM1 ⇄ calcul quantique — Python](#3-aide-à-la-décision-tm1--calcul-quantique--python)
-5. [Socle commun : sécurité, audit, gouvernance](#socle-commun--sécurité-audit-gouvernance)
-6. [Codes de sortie](#codes-de-sortie)
-7. [État de validation et points à confirmer](#état-de-validation-et-points-à-confirmer)
+This repository contains three small tools for people who work with financial planning data in **Pigment** and **IBM Planning Analytics (TM1)**.
 
----
-
-## Vue d'ensemble
-
-| Dossier | Rôle | Langage | Tests |
+| Folder | What it does | Language | Automated tests |
 |---|---|---|---|
-| [`pigment_tm1/`](pigment_tm1/) | Échange de données bidirectionnel Pigment ⇄ TM1 | Python 3.10+ | 26 |
-| [`pigment-tm1-java/`](pigment-tm1-java/) | Le même connecteur, pour les environnements Java | Java 17, Maven | 36 |
-| [`tm1_quantum/`](tm1_quantum/) | Aide à la décision : toutes les solutions, probabilités, calcul quantique, réécriture dans TM1 | Python 3.10+ | 39 |
+| [`pigment_tm1/`](pigment_tm1/) | Copies data between Pigment and TM1, in both directions | Python 3.10+ | 26 |
+| [`pigment-tm1-java/`](pigment-tm1-java/) | The same connector, written in Java | Java 17 + Maven | 36 |
+| [`tm1_quantum/`](tm1_quantum/) | Helps choose between options (for example, which projects to fund), and compares the result with a quantum algorithm | Python 3.10+ | 39 |
 
-```
-suite-epm/
-├── pigment_tm1/          connecteur Python (TM1py)
-├── pigment-tm1-java/     connecteur Java (API REST TM1 directe)
-└── tm1_quantum/          aide à la décision TM1 ⇄ quantique
-```
-
-Chaque dossier est autonome et a son propre README détaillé.
+Each folder works on its own and has its own detailed README. **Those detailed READMEs are currently in French only.**
 
 ---
 
-## 1. Connecteur Pigment ⇄ TM1 — Python
+## Design goals
 
-**Dossier** : [`pigment_tm1/`](pigment_tm1/)
+All three tools try to follow the same four principles. These are goals, not guarantees: they still need to be confirmed with real systems.
 
-Il échange des données dans les deux sens :
-- **Pigment → TM1** : par exemple, le budget saisi dans Pigment est chargé dans un cube TM1.
-- **TM1 → Pigment** : par exemple, le réel clôturé dans TM1 est importé dans Pigment.
+- **Checkable.** After writing data, the tool reads it back and compares it, cell by cell, with what it meant to write. It keeps a record of every run, so anyone can check what happened.
+- **Safe to fail.** The tool checks the data before writing anything. If something goes wrong during writing, it tries to put the target back the way it was, then checks that it did.
+- **Secure.** Passwords and keys are never stored in configuration files. Connections must use HTTPS. Secrets are hidden in logs.
+- **Controlled.** Each data flow is described in a configuration file that can be reviewed and versioned. Writing data requires a named approver. In production, it also requires a change ticket and a second person ("four-eyes" rule). Every action is recorded in a tamper-evident log.
 
-### Comment ça marche
+---
 
-1. **Extraction** de la source : vue Pigment exportée en CSV, ou lecture MDX d'un cube TM1.
-2. **Normalisation** via un mapping unique (colonne Pigment ↔ dimension TM1), utilisé dans les deux sens. Des tables de correspondance traduisent les membres (par exemple `Jan 27` ↔ `2027-01`).
-3. **Validation bloquante**. Sont refusés : éléments inconnus ou non feuilles, doublons, valeurs non numériques, membres protégés, lignes hors périmètre, source vide.
-4. **Prévisualisation** : cellules créées, modifiées, effacées, et variation du total.
-5. **Gouvernance** : seuil de variation, approbation, ticket, quatre yeux en production.
-6. **Écriture atomique** :
-   - vers TM1 : dans une sandbox, publiée seulement si la relecture est parfaite ; à défaut, sauvegarde puis restauration automatique ;
-   - vers Pigment : import, relecture d'une vue de vérification, et ré-import de l'état antérieur en cas d'écart.
-7. **Réconciliation** cellule par cellule. Le flux ne se termine en succès qu'à 100 % de concordance.
+## 1. Pigment ⇄ TM1 connector (Python)
 
-### Démarrage rapide
+**Folder:** [`pigment_tm1/`](pigment_tm1/)
+
+This tool moves numbers between Pigment and TM1. For example:
+
+- **Pigment → TM1:** load the budget entered in Pigment into a TM1 cube.
+- **TM1 → Pigment:** load closed actuals from TM1 into Pigment.
+
+### How it works
+
+1. **Read** the source data (a Pigment view exported as CSV, or a TM1 cube).
+2. **Translate** names between the two systems using one mapping, defined once and used in both directions. For example, `Jan 27` in Pigment becomes `2027-01` in TM1.
+3. **Check** the data. The run stops, and nothing is written, if it finds unknown members, duplicates, non-numeric values, protected members (such as `Actual`), rows outside the declared scope, or an empty source.
+4. **Preview** the changes: how many cells will be created, changed, or cleared, and how much the total will move.
+5. **Ask for approval**, and block the run if the total changes more than a set limit.
+6. **Write** the data:
+   - into TM1, inside a sandbox that is only published if the result is correct;
+   - into Pigment, through an import that is then read back and checked.
+7. **Compare** the result with the source, cell by cell. If they do not match, restore the previous state.
+
+### Try it
 
 ```bash
 cd pigment_tm1
 pip install -r requirements.txt
-cp config/flows.example.yaml config/flows.yaml        # à adapter
+python -m unittest discover -s tests -t .          # run the tests
+cp config/flows.example.yaml config/flows.yaml      # then edit it for your systems
 python -m connector -c config/flows.yaml run budget_pigment_to_tm1 --dry-run
-python -m connector -c config/flows.yaml run budget_pigment_to_tm1 --approved-by j.martin --ticket CHG-1234
-python -m unittest discover -s tests -t .
 ```
 
-**Points notables** :
-- configuration en YAML ;
-- appel à TM1 via la bibliothèque TM1py ;
-- l'effacement du périmètre utilise une fonction TM1py qui requiert des droits administrateur TM1.
+`--dry-run` reads and checks everything but writes nothing.
+
+**Good to know:** this version uses the TM1py library. Clearing a range of cells through TM1py requires TM1 administrator rights.
 
 ---
 
-## 2. Connecteur Pigment ⇄ TM1 — Java
+## 2. Pigment ⇄ TM1 connector (Java)
 
-**Dossier** : [`pigment-tm1-java/`](pigment-tm1-java/)
+**Folder:** [`pigment-tm1-java/`](pigment-tm1-java/)
 
-C'est le même connecteur, avec les mêmes garanties, pour les DSI standardisées sur Java. Les deux versions produisent des **empreintes de données identiques** : elles peuvent tourner en parallèle et être comparées.
+This is the same connector for teams that prefer Java. It follows the same steps and the same rules. Both versions calculate the same data fingerprints, so you can run them side by side and compare.
 
-**Différences avec la version Python** :
-- **Une seule dépendance d'exécution, Jackson.** HTTP, TLS, CSV et HMAC passent par le JDK.
-- **TM1 est appelé directement par son API REST** (OData v4), sans bibliothèque intermédiaire.
-- **L'effacement ne demande aucun droit administrateur** : le connecteur relit les cellules puis écrit des zéros.
-- **Quatre modes d'authentification TM1** : natif, CAM/LDAP, clé API (Planning Analytics SaaS), jeton.
-- Possibilité de déclarer un truststore PKCS12 pour une autorité de certification interne. La vérification TLS n'est jamais désactivable.
-- Configuration en JSON, avec les mêmes clés qu'en Python. Tout champ inconnu est refusé.
-- Les tests vérifient aussi **les requêtes HTTP réellement émises**, contre de faux serveurs TM1 et Pigment.
+Differences from the Python version:
 
-### Démarrage rapide
+- It talks to TM1 directly through its REST API, without TM1py.
+- It does **not** need TM1 administrator rights to clear cells.
+- It has only one runtime dependency (Jackson, for JSON).
+- It supports four TM1 login methods: native, CAM/LDAP, API key (Planning Analytics as a Service), and bearer token.
+- The configuration file is JSON instead of YAML.
+
+### Try it
 
 ```bash
 cd pigment-tm1-java
-mvn test                                   # 36 tests
-mvn package                                # target/pigment-tm1-connector.jar
+mvn test
+mvn package
 java -jar target/pigment-tm1-connector.jar -c config/flows.json run budget_pigment_to_tm1 --dry-run
 ```
 
+**Important:** Maven could not download its dependencies in the environment where this was written. The code was compiled and tested with `javac` and a simple test runner instead. Please run `mvn test` first to confirm the build works.
+
 ---
 
-## 3. Aide à la décision TM1 ⇄ calcul quantique — Python
+## 3. Decision support with a quantum algorithm (Python)
 
-**Dossier** : [`tm1_quantum/`](tm1_quantum/)
+**Folder:** [`tm1_quantum/`](tm1_quantum/)
 
-L'outil lit un problème de décision dans TM1, par exemple : *quels projets financer avec une enveloppe de Capex et d'ETP limitée ?* Il le résout ensuite de toutes les façons pertinentes, et explique le résultat à un comité de décision.
+This tool helps answer questions like: *"With a limited budget and limited staff, which projects should we fund?"*
 
-### Ce qu'il produit
+It reads the options and their costs from TM1, works out the possible choices, and writes a report in French that explains the result in plain language.
 
-- **Toutes les solutions possibles** :
-  - jusqu'à 20 options, chaque combinaison est examinée (2²⁰ ≈ 1 million) ;
-  - au-delà, les K meilleures solutions sont **prouvées** par un solveur exact (MILP).
-- **Un classement** par valeur attendue.
-- **Des probabilités pour chaque décision**, par simulation de Monte-Carlo sur les incertitudes :
-  - la probabilité d'être le meilleur choix, avec son intervalle de confiance à 95 % ;
-  - la fourchette de valeur entre les 5 % de scénarios les plus défavorables et les 5 % les plus favorables (P5–P95) ;
-  - la probabilité de faire mieux que la n°1.
-- **Une analyse par option** : la probabilité que chaque projet fasse partie de la meilleure décision.
-- **Une sensibilité** : quelle ressource limite, et ce que rapporterait une rallonge de 10 %.
-- **Le calcul quantique** : le problème est traduit en QUBO puis en Hamiltonien d'Ising, et résolu par l'algorithme QAOA. Il tourne sur un simulateur local exact ou sur IBM Quantum. **Chaque mesure est vérifiée classiquement**.
-- **Un rapport HTML en français**, lisible sur ordinateur et mobile, en mode clair ou sombre. Il contient :
-  - une recommandation, avec son niveau de confiance ;
-  - les alternatives plus sûres ou plus souvent gagnantes ;
-  - les décisions quasi équivalentes ;
-  - les décisions à écarter ;
-  - les choix fragiles à challenger.
+### What it does
 
-### Le calcul quantique, en clair
+- **Lists every valid combination.** With up to 20 options, it checks every possible combination (about one million at most). With more options, it uses an exact solver to find the best ones.
+- **Ranks them** by expected value.
+- **Estimates probabilities.** If you provide an uncertainty for each value, it runs thousands of simulated scenarios and reports, for each choice:
+  - how often it comes out as the best choice;
+  - a likely range of value (the 5th and 95th percentiles).
+- **Shows which constraint matters most**, and what a 10% increase in that resource would change.
+- **Runs a quantum algorithm (QAOA)** on the same problem. By default this runs on a local simulator. It can also run on IBM Quantum, if you explicitly enable it.
+- **Checks every answer from the quantum algorithm** with ordinary calculation before using it.
+- **Writes an HTML report** with a recommendation, the alternatives, the risks, and every check that was run.
+- **Writes the chosen option back to TM1**, but only after a person approves it, and only if the TM1 data has not changed since the analysis.
 
-- **Formulation compacte par défaut** (pénalisation déséquilibrée) : un qubit par option, sans qubit supplémentaire. Elle est **calibrée et vérifiée** pour que son minimum soit exactement la meilleure décision.
-- Si aucun réglage exact n'existe, l'outil **bascule** vers une formulation garantie (avec qubits d'écart), ou vers une formulation approchée, signalée dans le rapport.
-- Le **circuit est exporté en OpenQASM 2.0**. C'est la seule donnée qui quitterait l'entreprise : des angles et des numéros de qubits, sans libellé ni montant. Il est **simulé porte par porte** pour prouver qu'il réalise exactement le calcul annoncé.
-- Honnêteté du résultat : aujourd'hui, **le calcul quantique ne bat pas le calcul exact**. Il est mesuré contre lui à chaque analyse (fréquence de l'optimum, gain par rapport au hasard).
+### An honest note about the quantum part
 
-### Vérifié, pas seulement vérifiable
+- **The quantum algorithm does not beat ordinary calculation today.** On these problem sizes, the exact method is faster and always correct.
+- The quantum part is included so you can **learn, experiment, and measure**. Each report shows how well the quantum algorithm did compared with the exact answer.
+- The connection to real IBM Quantum hardware **has not been tested**, because the required library (Qiskit) was not available while this was written.
+- Real quantum hardware is noisy. Expect weaker results than on the simulator.
 
-- **10 contrôles automatiques** à chaque analyse. Un seul échec bloquant interdit toute publication.
-- Une **contre-vérification indépendante** dans les tests : une seconde implémentation en Python standard, sans aucun code de l'outil. Elle retrouve le même nombre de solutions, le même classement et les mêmes probabilités.
-
-### Gouvernance
-
-1. `analyze` lit TM1 sans rien écrire, puis produit le rapport et un résultat **scellé** (SHA‑256 inscrit au journal d'audit).
-2. Une personne habilitée relit le rapport.
-3. `writeback` réécrit la décision dans TM1. **Il refuse** si :
-   - le journal d'audit a été altéré ;
-   - le résultat a été modifié depuis l'analyse ;
-   - les données TM1 ont changé depuis l'analyse ;
-   - l'approbation manque (et, en production, le ticket ou les quatre yeux) ;
-   - la cible est un membre protégé (par exemple `Actual`).
-
-### Démarrage rapide (sans TM1, sur données de démonstration)
+### Try it with sample data (no TM1 needed)
 
 ```bash
 cd tm1_quantum
 pip install -r requirements.txt
+python -m unittest discover -s tests -t .
 python -m tm1q -c config/decision.example.yaml analyze portefeuille_2027 --input examples/projets_demo.csv
-python -m unittest discover -s tests -t .          # 39 tests
 ```
 
-Un exemple de rapport est fourni : [`tm1_quantum/examples/rapport_demo.html`](tm1_quantum/examples/rapport_demo.html).
+A sample report is included: [`tm1_quantum/examples/rapport_demo.html`](tm1_quantum/examples/rapport_demo.html).
 
-### Performances observées (simulateur local, 2 cœurs)
+### Measured run times (local simulator, 2 CPU cores)
 
-| Options | Combinaisons examinées | Solutions admissibles | Qubits | Durée |
+| Options | Combinations checked | Valid combinations | Qubits | Total time |
 |---|---|---|---|---|
-| 10 | 1 024 | 143 | 9 | 4 s |
-| 16 | 65 536 | 5 079 | 15 | 14 s |
-| 20 | 1 048 576 | 61 226 | 19 | 2 min 30 |
+| 10 | 1,024 | 143 | 9 | about 4 seconds |
+| 16 | 65,536 | 5,079 | 15 | about 14 seconds |
+| 20 | 1,048,576 | 61,226 | 19 | about 2.5 minutes |
 
 ---
 
-## Socle commun : sécurité, audit, gouvernance
+## Shared building blocks
 
-**Secrets**
-- Ils sont lus dans des variables d'environnement (`VAR`) ou des fichiers montés (`VAR_FILE`) : Vault, Key Vault, secrets Kubernetes.
-- Un mot de passe écrit en clair dans la configuration est **rejeté**.
+The three tools share the same approach to security and control:
 
-**Transport**
-- HTTPS obligatoire, vérification TLS non désactivable, aucune redirection suivie silencieusement.
-
-**Journal d'audit**
-- Il est append-only et **chaîné** : chaque événement contient l'empreinte du précédent.
-- Il est **signé HMAC-SHA256** (obligatoire en production).
-- Toute modification, suppression ou insertion est détectée par `verify-audit`.
-
-**Preuves par exécution**
-- Source brute, données normalisées, état antérieur de la cible, écarts, rapport.
-- Fichiers créés en droits restreints (`rw-r-----`).
-- Elles contiennent des données financières : appliquez votre politique de rétention et de chiffrement.
-
-**Verrou**
-- Deux exécutions simultanées du même flux sont impossibles.
-
-**Mode `--dry-run` / `analyze`**
-- Ils extraient, valident et prévisualisent sans rien écrire.
-
-**Production**
-- Une référence de ticket est exigée.
-- L'approbateur doit être différent de l'opérateur.
-- L'audit doit être signé.
+- **Secrets** are read from environment variables, or from mounted files such as Vault, Azure Key Vault, or Kubernetes secrets. A password written directly in a configuration file is rejected.
+- **Connections** must use HTTPS, and certificate checking cannot be turned off.
+- **Audit log.** Every important step is added to a log file. Each entry includes a fingerprint of the previous one, and in production the entries are signed with a secret key. If someone edits, deletes, or inserts a line, the `verify-audit` command will detect it.
+- **Evidence.** Each run saves its inputs, the previous state of the target, any differences found, and a report. These files contain financial data, so protect them like any other financial data.
+- **Lock.** The same flow cannot run twice at the same time.
 
 ---
 
-## Codes de sortie
+## Exit codes
 
-| Code | Signification | Pigment ⇄ TM1 | Quantique |
-|---|---|---|---|
-| 0 | Succès | ✔ | ✔ |
-| 2 | Configuration invalide | ✔ | ✔ |
-| 3 | Secret manquant | ✔ | ✔ |
-| 4 | Données invalides, **rien écrit** | ✔ | ✔ |
-| 5 | Règle de gouvernance, **rien écrit** | ✔ | ✔ |
-| 6 | Échec de chargement, état restauré | ✔ | ✔ |
-| 7 | Écart de réconciliation, état **restauré et vérifié** | ✔ | ✔ |
-| 8 | Exécution déjà en cours | ✔ | ✔ |
-| 9 | **CRITIQUE** : restauration impossible, intervention manuelle | ✔ | ✔ |
-| 10 | Journal d'audit altéré | ✔ | ✔ |
-| 11 | Contrôle de vérification en échec | | ✔ |
-| 12 | Aucune solution admissible | | ✔ |
-| 64 | Erreur d'usage de la ligne de commande | Java | |
+These codes let a scheduler (Control-M, Airflow, cron, TM1 chores) know what happened.
 
-Ils sont conçus pour les ordonnanceurs : Control‑M, Airflow, cron, chores TM1.
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 2 | Invalid configuration |
+| 3 | Missing secret |
+| 4 | Invalid data. **Nothing was written.** |
+| 5 | Blocked by a control rule (approval, ticket, or limit). **Nothing was written.** |
+| 6 | Loading failed. The previous state was restored. |
+| 7 | The written data did not match the source. The previous state was restored and checked. |
+| 8 | Another run of the same flow is already in progress |
+| 9 | **Critical:** the previous state could not be restored. Manual action is needed. |
+| 10 | The audit log has been altered |
+| 11 | A verification check failed (decision-support tool only) |
+| 12 | No combination meets all the constraints (decision-support tool only) |
+| 64 | Command-line usage error (Java only) |
+
+---
+
+## Current status and what still needs testing
+
+**This is a first draft.** Here is what has been done, and what has not.
+
+**Done**
+
+- 101 automated tests, all passing.
+- The tests use simulated versions of Pigment and TM1, and small local web servers that imitate their APIs.
+- The tests include failure cases on purpose: a write that silently loses a cell, a partial import, an edited audit log, TM1 data that changes between analysis and write-back, and two runs at the same time.
+
+**Not done yet: please test these before any real use**
+
+1. **Real Pigment and TM1 systems.** The API details were taken from public documentation and must be checked:
+   - Pigment: endpoint URLs, the name of the import ID field, and the import status values (see `https://pigment.app/api/swagger`);
+   - TM1: behaviour on your version (11.x or 12) and your login method.
+2. **The Maven build** of the Java version (see above).
+3. **IBM Quantum hardware** (see above).
+4. **Large data volumes.** Reading is done in one request. Very large ranges may need to be split into several flows.
+
+**Suggested order for testing**
+
+1. Run the automated tests.
+2. Run `validate-config`.
+3. Run with `--dry-run` in a test environment, and compare the preview with what you see in Pigment and TM1.
+4. Do a real write in the test environment.
+5. Cause failures on purpose (an unknown member, a large change, a protected member, two runs at once, an edited audit log) and check that the tool stops as expected.
+6. Only then consider production.
 
 ---
 
-## État de validation et points à confirmer
+## Limitations
 
-**Ce qui est testé**
-- 101 tests au total.
-- Pigment et TM1 sont simulés en mémoire, et des serveurs HTTP locaux imitent les vraies API.
-- Le tout couvre les cas nominaux et les échecs provoqués :
-  - corruption silencieuse d'une écriture ;
-  - import partiel ;
-  - falsification de l'audit ;
-  - données modifiées entre l'analyse et l'écriture ;
-  - exécutions concurrentes.
-
-**Ce qui n'a pas pu être testé ici** et doit être validé dans votre environnement avant la production :
-
-1. **Vos instances Pigment et TM1 réelles.** Points à vérifier :
-   - côté Pigment (sur `https://pigment.app/api/swagger`) : les URL, le champ identifiant d'import et les libellés de statut ;
-   - côté TM1 : le comportement REST selon la version (11.x ou 12) et le mode d'authentification SaaS.
-2. **Le build Maven** : le dépôt Maven Central était inaccessible pendant le développement. Le code Java a été compilé et testé avec `javac` ; lancez `mvn test` en premier.
-3. **L'exécution sur IBM Quantum** : Qiskit était indisponible. Le circuit soumis est vérifié, mais l'appel à IBM Quantum reste à valider sur votre compte.
-4. **La volumétrie** au-delà de quelques millions de cellules : découpez le périmètre en plusieurs flux si besoin.
-
-**Démarche recommandée**
-1. `validate-config`.
-2. `--dry-run` sur un environnement de test.
-3. Écriture réelle en test, puis échecs provoqués volontairement (membre inconnu, seuil, membre protégé, concurrence, audit falsifié).
-4. Passage en production.
+- Only numeric cells are supported. Text cells are not.
+- Metadata is not synchronised. Members and lists must already exist on both sides.
+- Only the main hierarchy of each TM1 dimension is used.
+- In the decision-support tool, uncertainties are treated as independent of each other, and costs are treated as certain.
+- The decision-support tool informs a decision. It does not make it.
 
 ---
+
+## Contributing
+
+Issues, corrections, and pull requests are welcome. Reports from people who have tried this on real systems would be especially helpful.
 
 ## Licence
 
-À définir par le propriétaire du dépôt.
+To be decided by the repository owner.
+
+---
+
+*Written as a starting point. I hope it helps, and I would be glad to hear if it works for you.*
